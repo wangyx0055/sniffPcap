@@ -1,7 +1,7 @@
-some simple realisation sniffer via libpcap
+some simple sniffer via libpcap
 
 TODO:
-* refectore
+* refect
 * add deamon/service
 * something else?
 
