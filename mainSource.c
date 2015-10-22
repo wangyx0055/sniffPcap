@@ -1,25 +1,73 @@
-#include <pcap.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include <ctype.h>
+#include <errno.h>
+
+
+#include <unistd.h> // for parsing input (getopt)
 #include <signal.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/ip_icmp.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
+#include <sys/types.h>
+#include <sys/socket.h> //reserved
+//#include <netinet/in.h>  //reserved
+#include <netinet/ip.h> // ip struct
+//#include <netinet/ip_icmp.h> //icmp struct
+//#include <netinet/tcp.h> // tcp struct
+#include <netinet/udp.h> // udp struct
+
 #include <arpa/inet.h>
 
+//#include <pcap.h>
+#include "sniffer.h"
 pcap_t *pd;
 int linkhdrlen;
+#define SIZE_UDP        8               /* length of UDP header */
 
+/* ethernet headers are always exactly 14 bytes [1] */
+#define SIZE_ETHERNET 14
+#define IP_HL(ip)               (((ip)->ip_vhl) & 0x0f)
+#define IP_V(ip)                (((ip)->ip_vhl) >> 4)
+/* Ethernet addresses are 6 bytes */
+#define ETHER_ADDR_LEN  6
+/*
 void bailout(int signo);
 void parsePacket(u_char *user, struct pcap_pkthdr *packethdr, u_char *packetptr);
 void captureLoop(pcap_t* pd, int packets, pcap_handler func);
 pcap_t* openPcapSocet(char *device, const char *bpfstr);
+*/
 
+struct sniff_udp {
+         u_short uh_sport;               /* source port */
+         u_short uh_dport;               /* destination port */
+         u_short uh_ulen;                /* udp length */
+         u_short uh_sum;                 /* udp checksum */
+
+};
+
+
+/* IP header */
+struct sniff_ip {
+        u_char  ip_vhl;                 /* version << 4 | header length >> 2 */
+        u_char  ip_tos;                 /* type of service */
+        u_short ip_len;                 /* total length */
+        u_short ip_id;                  /* identification */
+        u_short ip_off;                 /* fragment offset field */
+        #define IP_RF 0x8000            /* reserved fragment flag */
+        #define IP_DF 0x4000            /* dont fragment flag */
+        #define IP_MF 0x2000            /* more fragments flag */
+        #define IP_OFFMASK 0x1fff       /* mask for fragmenting bits */
+        u_char  ip_ttl;                 /* time to live */
+        u_char  ip_p;                   /* protocol */
+        u_short ip_sum;                 /* checksum */
+        struct  in_addr ip_src,ip_dst;  /* source and dest address */
+};
+
+/* Ethernet header */
+struct sniff_ethernet {
+        u_char  ether_dhost[ETHER_ADDR_LEN];    /* destination host address */
+        u_char  ether_shost[ETHER_ADDR_LEN];    /* source host address */
+        u_short ether_type;                     /* IP? ARP? RARP? etc */
+};
 
 
 int main(int argc, char **argv)
@@ -147,28 +195,60 @@ void captureLoop(pcap_t* pd, int packets, pcap_handler func)
 
 void parsePacket(u_char *user, struct pcap_pkthdr *packethdr, u_char *packetptr)
 {
-    struct ip* iphdr;
-    struct icmphdr* icmphdr;
-    struct tcphdr* tcphdr;
-    struct udphdr* udphdr;
+
+
+
+
+    //struct ip* iphdr;
+    //struct icmphdr* icmphdr; // reserved for icmp
+    //struct tcphdr* tcphdr; // reserved for tcp
+    //struct udphdr* udphdr;
+    //const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
+    const struct sniff_ip *ip;              /* The IP header */
+    const struct sniff_udp *udp;            /* The UDP header */
+    const unsigned char *payload;                    /* Packet payload */
+
+
+
     char iphdrInfo[256], srcip[256], dstip[256];
-    unsigned short id, seq;
+  //  unsigned short id, seq; // also reserved
+    int size_ip;
+    int size_payload;
+
+    /* define ethernet header */
+   // ethernet = (struct sniff_ethernet*)(packetptr);
+
+    /* define/compute ip header offset */
+    ip = (struct sniff_ip*)(packetptr + SIZE_ETHERNET);
 
     // skip datalink layer header and get the IP header fields
-    packetptr += linkhdrlen;
-    iphdr = (struct ip*)packetptr;
-    strcpy(srcip, inet_ntoa(iphdr->ip_src));
-    strcpy(dstip, inet_ntoa(iphdr->ip_dst));
+   // packetptr += linkhdrlen;
+    //iphdr = (struct ip*)packetptr;
+    strcpy(srcip, inet_ntoa(ip->ip_src));
+    strcpy(dstip, inet_ntoa(ip->ip_dst));
+
+    // make string with info
     sprintf(iphdrInfo, "ID:%d TOS:0x%x, TTL:%d IpLen:%d DgLen:%d",
-            ntohs(iphdr->ip_id), iphdr->ip_tos, iphdr->ip_ttl,
-            4*iphdr->ip_hl, ntohs(iphdr->ip_len));
+            ntohs(ip->ip_id), ip->ip_tos, ip->ip_ttl,
+            4*ip->ip_vhl, ntohs(ip->ip_len));
+    //printf("%s\n", iphdrInfo);
+
+    size_ip = IP_HL(ip)*4;
+    if (size_ip < 20) {
+        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        return;
+    }
+
+    /* print source and destination IP addresses */
+/*    printf("       From: %s\n", inet_ntoa(ip->ip_src));
+    printf("         To: %s\n", inet_ntoa(ip->ip_dst));*/
 
     // Advance to the transport layer header then parse and display
     // the fields based on the type of hearder: tcp, udp or icmp
-    packetptr += 4*iphdr->ip_hl;
-    switch (iphdr->ip_p)
+    //packetptr += 4*ip->ip_hl;
+    switch (ip->ip_p)
     {
-    case IPPROTO_TCP:
+    //case IPPROTO_TCP:
     /*    tcphdr = (struct tcphdr*)packetptr;
         printf("TCP  %s:%d -> %s:%d\n", srcip, ntohs(tcphdr->source),
                dstip, ntohs(tcphdr->dest));
@@ -185,13 +265,41 @@ void parsePacket(u_char *user, struct pcap_pkthdr *packethdr, u_char *packetptr)
         break;
 
     case IPPROTO_UDP:
-        udphdr = (struct udphdr*)packetptr;
+    {
+        printf("\n\n******************************\n\n");
+     /*   udphdr = (struct udphdr*)packetptr;
         printf("UDP  %s:%d -> %s:%d\n", srcip, ntohs(udphdr->source),
                dstip, ntohs(udphdr->dest));
         printf("%s\n", iphdrInfo);
-        break;
+*/
+        /* define/compute tcp header offset */
+        printf("       From: %s\n", inet_ntoa(ip->ip_src));
+        printf("         To: %s\n", inet_ntoa(ip->ip_dst));
+        udp = (struct sniff_udp*)(packetptr + SIZE_ETHERNET + SIZE_UDP);
+        printf("   Src port: %d\n", ntohs(udp->uh_sport));
+        printf("   Dst port: %d\n", ntohs(udp->uh_dport));
 
-    case IPPROTO_ICMP:
+        /* define/compute udp payload (segment) offset */
+        payload = (u_char *)(packetptr + SIZE_ETHERNET + size_ip + SIZE_UDP);
+
+        /* compute udp payload (segment) size */
+        size_payload = ntohs(ip->ip_len) - (size_ip + SIZE_UDP);
+        if (size_payload > ntohs(udp->uh_ulen))
+            size_payload = ntohs(udp->uh_ulen);
+
+        /*
+        * Print payload data; it might be binary, so don't just
+        * treat it as a string.
+        */
+        if (size_payload > 0)
+        {
+            printf("   Payload (%d bytes):\n", size_payload);
+            print_payload(payload, size_payload);
+        }
+        break;
+    }
+
+    /*case IPPROTO_ICMP:
         icmphdr = (struct icmphdr*)packetptr;
         printf("ICMP %s -> %s\n", srcip, dstip);
         printf("%s\n", iphdrInfo);
@@ -199,11 +307,10 @@ void parsePacket(u_char *user, struct pcap_pkthdr *packethdr, u_char *packetptr)
         memcpy(&seq, (u_char*)icmphdr+6, 2);
         printf("Type:%d Code:%d ID:%d Seq:%d\n", icmphdr->type, icmphdr->code,
                ntohs(id), ntohs(seq));
-        break;
+        break;*/
     }
-    printf("******************************\n\n");
 }
-
+// ala callback in windows
 void bailout(int signo)
 {
     struct pcap_stat stats;
@@ -215,4 +322,102 @@ void bailout(int signo)
     }
     pcap_close(pd);
     exit(0);
+}
+
+/*
+ * print packet payload data (avoid printing binary data)
+ */
+void
+print_payload(const u_char *payload, int len)
+{
+
+    int len_rem = len;
+    int line_width = 16;            /* number of bytes per line */
+    int line_len;
+    int offset = 0;                 /* zero-based offset counter */
+    const u_char *ch = payload;
+
+    if (len <= 0)
+        return;
+
+    /* data fits on one line */
+    if (len <= line_width) {
+        print_hex_ascii_line(ch, len, offset);
+        return;
+    }
+
+    /* data spans multiple lines */
+    for ( ;; ) {
+        /* compute current line length */
+        line_len = line_width % len_rem;
+        /* print line */
+        print_hex_ascii_line(ch, line_len, offset);
+        /* compute total remaining */
+        len_rem = len_rem - line_len;
+        /* shift pointer to remaining bytes to print */
+        ch = ch + line_len;
+        /* add offset */
+        offset = offset + line_width;
+        /* check if we have line width chars or less */
+        if (len_rem <= line_width) {
+            /* print last line and get out */
+            print_hex_ascii_line(ch, len_rem, offset);
+            break;
+        }
+    }
+
+return;
+}
+
+/*
+ * print data in rows of 16 bytes: offset   hex   ascii
+ *
+ * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
+ */
+void
+print_hex_ascii_line(const u_char *payload, int len, int offset)
+{
+
+    int i;
+    int gap;
+    const u_char *ch;
+
+    /* offset */
+    printf("%05d   ", offset);
+
+    /* hex */
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        printf("%02x ", *ch);
+        ch++;
+        /* print extra space after 8th byte for visual aid */
+        if (i == 7)
+            printf(" ");
+    }
+    /* print space to handle line less than 8 bytes */
+    if (len < 8)
+        printf(" ");
+
+    /* fill hex gap with spaces if not full line */
+    if (len < 16) {
+        gap = 16 - len;
+        for (i = 0; i < gap; i++) {
+            printf("   ");
+        }
+    }
+    printf("   ");
+
+    /* ascii (if printable) */
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        if (isprint(*ch))
+            printf("%c", *ch);
+        else
+            printf(".");
+        ch++;
+    }
+
+    printf("\n");
+
+return;
 }
